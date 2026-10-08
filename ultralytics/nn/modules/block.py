@@ -39,6 +39,7 @@ __all__ = (
     "C2fPSA",
     "C3Ghost",
     "C3k2",
+    "C3k2Ghost",
     "C3x",
     "CBFuse",
     "CBLinear",
@@ -1125,6 +1126,51 @@ class C3k(C3):
         c_ = int(c2 * e)  # hidden channels
         # self.m = nn.Sequential(*(RepBottleneck(c_, c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n)))
         self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n)))
+
+
+class BottleneckGhost(nn.Module):
+    """Bottleneck whose two 3x3 Conv layers are replaced by GhostConv (TA scenario B)."""
+
+    def __init__(self, c1: int, c2: int, shortcut: bool = True, g: int = 1, k: tuple = (3, 3), e: float = 0.5):
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = GhostConv(c1, c_, k[0], 1)
+        self.cv2 = GhostConv(c_, c2, k[1], 1, g=g)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply Ghost bottleneck with optional shortcut connection."""
+        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
+
+class C3kGhost(C3k):
+    """C3k whose inner Bottlenecks are BottleneckGhost."""
+
+    def __init__(self, c1: int, c2: int, n: int = 1, shortcut: bool = True, g: int = 1, e: float = 0.5, k: int = 3):
+        super().__init__(c1, c2, n, shortcut, g, e, k)
+        c_ = int(c2 * e)
+        self.m = nn.Sequential(*(BottleneckGhost(c_, c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n)))
+
+
+class C3k2Ghost(C3k2):
+    """C3k2 with GhostConv inside every inner block. 1x1 convs (cv1/cv2) of the CSP wrapper stay standard."""
+
+    def __init__(
+        self,
+        c1: int,
+        c2: int,
+        n: int = 1,
+        c3k: bool = False,
+        e: float = 0.5,
+        attn: bool = False,
+        g: int = 1,
+        shortcut: bool = True,
+    ):
+        super().__init__(c1, c2, n, c3k, e, attn, g, shortcut)
+        self.m = nn.ModuleList(
+            C3kGhost(self.c, self.c, 2, shortcut, g) if c3k else BottleneckGhost(self.c, self.c, shortcut, g)
+            for _ in range(n)
+        )
 
 
 class RepVGGDW(torch.nn.Module):
