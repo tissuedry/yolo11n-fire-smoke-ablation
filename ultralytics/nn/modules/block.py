@@ -40,6 +40,7 @@ __all__ = (
     "C3Ghost",
     "C3k2",
     "C3k2Ghost",
+    "TripletAttention",
     "C3x",
     "CBFuse",
     "CBLinear",
@@ -1171,6 +1172,47 @@ class C3k2Ghost(C3k2):
             C3kGhost(self.c, self.c, 2, shortcut, g) if c3k else BottleneckGhost(self.c, self.c, shortcut, g)
             for _ in range(n)
         )
+
+
+class ZPool(nn.Module):
+    """Z-pool of Triplet Attention: concatenate max- and mean-pooling over the channel dimension."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return (B, 2, H, W) from (B, C, H, W)."""
+        return torch.cat((x.amax(1, keepdim=True), x.mean(1, keepdim=True)), dim=1)
+
+
+class TripletAttentionGate(nn.Module):
+    """One branch of Triplet Attention: Z-pool -> 7x7 Conv+BN (no activation) -> sigmoid -> rescale input."""
+
+    def __init__(self, k: int = 7):
+        super().__init__()
+        self.pool = ZPool()
+        self.conv = Conv(2, 1, k, 1, k // 2, act=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the attention gate."""
+        return x * torch.sigmoid(self.conv(self.pool(x)))
+
+
+class TripletAttention(nn.Module):
+    """Triplet Attention (Misra et al., WACV 2021). Three branches (C-W, C-H, H-W) averaged; output shape == input.
+
+    Takes no arguments, so it is written as `TripletAttention, []` in the YAML. Only ~300 parameters per module.
+    """
+
+    def __init__(self, *args):
+        super().__init__()
+        self.cw = TripletAttentionGate()  # interaction between channel and width (H is pooled)
+        self.hc = TripletAttentionGate()  # interaction between height and channel (W is pooled)
+        self.hw = TripletAttentionGate()  # spatial attention (C is pooled)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Average the outputs of the three attention branches."""
+        o1 = self.cw(x.permute(0, 2, 1, 3)).permute(0, 2, 1, 3)
+        o2 = self.hc(x.permute(0, 3, 2, 1)).permute(0, 3, 2, 1)
+        o3 = self.hw(x)
+        return (o1 + o2 + o3) / 3.0
 
 
 class RepVGGDW(torch.nn.Module):
